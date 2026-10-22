@@ -15,6 +15,7 @@ class NodeService : Service() {
     companion object {
         const val ACTION_START = "com.bosh.substore.START"
         const val ACTION_STOP = "com.bosh.substore.STOP"
+        const val ACTION_EXIT = "com.bosh.substore.EXIT"
         private const val CHANNEL_ID = "substore_node"
         private const val NOTIF_ID = 42
 
@@ -48,6 +49,17 @@ class NodeService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_EXIT) {
+            // 通知栏「退出」：撤通知 → 同步停 node → 结束整个 App 进程（界面与服务同进程）
+            BootLog.append(this, "通知栏退出：彻底结束 CatSub")
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            Thread {
+                NodeRuntime.stopNow(this)
+                stopSelf()
+                android.os.Process.killProcess(android.os.Process.myPid())
+            }.start()
+            return START_NOT_STICKY
+        }
         startForeground(NOTIF_ID, buildNotification())
         NodeRuntime.start(this)
         startWatchdog()
@@ -64,11 +76,17 @@ class NodeService : Service() {
             Notification.Builder(this, CHANNEL_ID)
         else
             @Suppress("DEPRECATION") Notification.Builder(this)
+        val exitPi = PendingIntent.getService(
+            this, 1,
+            Intent(this, NodeService::class.java).setAction(ACTION_EXIT),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         return b
             .setContentTitle("CatSub 运行中")
             .setContentText("本机服务 ${NodeRuntime.BASE_URL} · 点按打开")
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setContentIntent(open)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "退出", exitPi)
             .setOngoing(true)
             .build()
     }

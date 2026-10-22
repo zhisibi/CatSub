@@ -40,7 +40,7 @@ import android.widget.Toast
 class MainActivity : Activity() {
 
     companion object {
-        const val APP_VERSION = "1.1.5"
+        const val APP_VERSION = "1.1.6"
         const val REPO_URL = "https://github.com/zhisibi/CatSub.git"
 
         const val DISCLAIMER = "CatSub 是 Sub-Store 的第三方安卓客户端。Sub-Store 为 AGPL-3.0 开源项目，版权归其原作者及全体贡献者所有。\n\n" +
@@ -508,6 +508,7 @@ class MainActivity : Activity() {
         autoItem.isCheckable = true
         autoItem.isChecked = Prefs.autostart(this)
         menu.menu.add(0, 6, 0, "关于")
+        menu.menu.add(0, 12, 90, "彻底退出")
         menu.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 10 -> {
@@ -562,10 +563,31 @@ class MainActivity : Activity() {
                     Toast.makeText(this, if (v) "开机自启：开" else "开机自启：关", Toast.LENGTH_SHORT).show()
                 }
                 6 -> showAbout()
+                12 -> {
+                    AlertDialog.Builder(this)
+                        .setTitle("彻底退出")
+                        .setMessage("将停止本机后端服务、撤掉常驻通知并关闭 CatSub，前后端都结束运行。下次打开会重新启动服务。")
+                        .setPositiveButton("退出") { _, _ -> exitApp() }
+                        .setNegativeButton("取消", null)
+                        .show()
+                }
             }
             true
         }
         menu.show()
+    }
+
+    /** 彻底退出：同步停掉 node 后端（stopRequested 让看门狗不再拉起），停掉前台服务（通知随服务销毁移除），随后结束任务并杀掉本进程，WebView 与全部线程一并终止。 */
+    private fun exitApp() {
+        BootLog.append(this, "用户选择彻底退出：停止后端并结束 App 进程")
+        Thread {
+            NodeRuntime.stopNow(this)
+            runOnUiThread {
+                try { stopService(Intent(this, NodeService::class.java)) } catch (_: Throwable) {}
+                finishAndRemoveTask()
+                android.os.Process.killProcess(android.os.Process.myPid())
+            }
+        }.start()
     }
 
     private fun showAbout() {

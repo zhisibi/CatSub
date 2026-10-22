@@ -280,6 +280,20 @@ object NodeRuntime {
         setState(State.STOPPED)
     }
 
+    /** 彻底退出专用：在当前线程同步停掉 node（先 destroy，短暂等待仍不退则强杀），不依赖延迟强杀线程——调用方随后会结束 App 进程，延迟线程活不到触发。 */
+    @Synchronized
+    fun stopNow(ctx: Context) {
+        stopRequested = true
+        val p = process
+        process = null
+        if (p != null) {
+            p.destroy()
+            try { p.waitFor(800, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: Throwable) {}
+            if (p.isAlive) p.destroyForcibly()
+        }
+        setState(State.STOPPED)
+    }
+
     fun probe(): Boolean {
         return try {
             val conn = URL("$BASE_URL/api/utils/env").openConnection() as HttpURLConnection
