@@ -1,0 +1,267 @@
+package com.bosh.substore
+
+import android.content.Context
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.CopyOnWriteArraySet
+
+/**
+ * 负责把 assets 里的 Sub-Store 后端 bundle + 前端释放到私有目录，
+ * 并用内嵌的 Termux Node 二进制（jniLibs 里的 libnodebin.so）把后端跑起来。
+ */
+object NodeRuntime {
+    const val PORT = 3000
+    const val BASE_URL = "http://127.0.0.1:3000"
+    // 内置组件版本；升级内置组件时同步改 RUNTIME_VERSION 触发重新释放
+    const val BUNDLED_BACKEND_VERSION = "2.42.6"
+    const val BUNDLED_FRONTEND_VERSION = "2.34.1"
+    const val NODE_VERSION = "26.4.0"
+    const val RUNTIME_VERSION = "backend-2.42.6_frontend-2.34.1_node-26.4.0_v3"
+
+    enum class State { STOPPED, STARTING, RUNNING, FAILED }
+
+    @Volatile var state: State = State.STOPPED
+        private set
+
+    @Volatile private var process: Process? = null
+    @Volatile private var stopRequested = false
+
+    private val listeners = CopyOnWriteArraySet<(State) -> Unit>()
+
+    fun addListener(l: (State) -> Unit) { listeners.add(l) }
+    fun removeListener(l: (State) -> Unit) { listeners.remove(l) }
+
+    private fun setState(s: State) {
+        state = s
+        for (l in listeners) try { l(s) } catch (_: Throwable) {}
+    }
+
+    fun isProcessAlive(): Boolean = process?.isAlive == true
+    fun isStopRequested(): Boolean = stopRequested
+
+    fun runtimeDir(ctx: Context): File = File(ctx.filesDir, "runtime")
+    fun dataDir(ctx: Context): File = File(ctx.filesDir, "data")
+    fun logFile(ctx: Context): File = File(ctx.filesDir, "logs/node.log")
+    fun bundleFile(ctx: Context): File = File(runtimeDir(ctx), "sub-store.bundle.js")
+    fun frontendDir(ctx: Context): File = File(runtimeDir(ctx), "frontend")
+
+    private fun dynamicMarker(ctx: Context): File = File(runtimeDir(ctx), "DYNAMIC.txt")
+
+    /** 在线更新后的动态版本（backend to frontend）；未更新过时为 null to null。 */
+    fun dynamicVersions(ctx: Context): Pair<String?, String?> {
+        val m = dynamicMarker(ctx)
+        if (!m.exists()) return null to null
+        var b: String? = null
+        var f: String? = null
+        for (part in m.readText().trim().split(";")) {
+            val kv = part.split("=", limit = 2)
+            if (kv.size == 2) {
+                if (kv[0] == "backend") b = kv[1]
+                if (kv[0] == "frontend") f = kv[1]
+            }
+        }
+        return b to f
+    }
+
+    fun effectiveBackendVersion(ctx: Context): String =
+        dynamicVersions(ctx).first ?: BUNDLED_BACKEND_VERSION
+
+    fun effectiveFrontendVersion(ctx: Context): String =
+        dynamicVersions(ctx).second ?: BUNDLED_FRONTEND_VERSION
+
+    fun isDynamic(ctx: Context): Boolean = dynamicMarker(ctx).exists()
+
+    /** 释放 assets/runtime 到 filesDir/runtime；版本一致或已有动态更新则跳过。 */
+    @Synchronized
+    fun ensureExtracted(ctx: Context) {
+        if (isDynamic(ctx) && bundleFile(ctx).exists() && frontendDir(ctx).exists()) return
+        if (Prefs.extractedVer(ctx) == RUNTIME_VERSION && bundleFile(ctx).exists()) return
+        val dir = runtimeDir(ctx)
+        dir.deleteRecursively()
+        dir.mkdirs()
+        copyAssetTree(ctx, "runtime", dir)
+        Prefs.setExtractedVer(ctx, RUNTIME_VERSION)
+    }
+
+    /** 应用在线更新下载好的后端 bundle 与前端目录，并打动态标记。 */
+    @Synchronized
+    fun applyUpdate(ctx: Context, newBundle: File, newFrontendDir: File, backendVer: String, frontendVer: String) {
+        stop(ctx)
+        val dir = runtimeDir(ctx)
+        dir.mkdirs()
+        newBundle.copyTo(bundleFile(ctx), overwrite = true)
+        val fe = frontendDir(ctx)
+        fe.deleteRecursively()
+        newFrontendDir.copyRecursively(fe, overwrite = true)
+        dynamicMarker(ctx).writeText("backend=$backendVer;frontend=$frontendVer")
+        Prefs.setExtractedVer(ctx, RUNTIME_VERSION)
+        BootLog.append(ctx, "已应用动态更新：后端 $backendVer / 前端 $frontendVer")
+    }
+
+    /** 恢复 APK 内置版本（清掉动态更新文件，下次启动重新释放）。 */
+    @Synchronized
+    fun resetToBundled(ctx: Context) {
+        stop(ctx)
+        runtimeDir(ctx).deleteRecursively()
+        Prefs.setExtractedVer(ctx, "")
+        BootLog.append(ctx, "已恢复内置版本，下次启动将重新释放 assets")
+    }
+
+    private fun copyAssetTree(ctx: Context, assetPath: String, outDir: File) {
+        val am = ctx.assets
+        val children = am.list(assetPath) ?: emptyArray()
+        if (children.isEmpty()) {
+            am.open(assetPath).use { input ->
+                outDir.outputStream().use { input.copyTo(it) }
+            }
+            return
+        }
+        outDir.mkdirs()
+        for (child in children) {
+            copyAssetTree(ctx, "$assetPath/$child", File(outDir, child))
+        }
+    }
+
+    @Synchronized
+    fun start(ctx: Context) {
+        if (isProcessAlive()) { setState(State.RUNNING); return }
+        stopRequested = false
+        setState(State.STARTING)
+        Thread {
+            try {
+                BootLog.append(ctx, "== NodeRuntime.start 开始 ==")
+                ensureExtracted(ctx)
+                BootLog.append(ctx, "运行时文件已释放到 ${runtimeDir(ctx)}")
+                dataDir(ctx).mkdirs()
+                val log = logFile(ctx)
+                log.parentFile?.mkdirs()
+                val nativeLib = ctx.applicationInfo.nativeLibraryDir
+                val pb = ProcessBuilder(
+                    "$nativeLib/libnodebin.so",
+                    bundleFile(ctx).absolutePath
+                )
+                pb.directory(ctx.filesDir)
+                pb.redirectErrorStream(true)
+                pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
+                val env = pb.environment()
+                env["PATH"] = "/system/bin:$nativeLib"
+                env["LD_LIBRARY_PATH"] = nativeLib
+                env["HOME"] = ctx.filesDir.absolutePath
+                env["TMPDIR"] = File(ctx.filesDir, "tmp").apply { mkdirs() }.absolutePath
+                env["TZ"] = "Asia/Shanghai"
+                env["NODE_ENV"] = "production"
+                env["SUB_STORE_BACKEND_API_HOST"] = "127.0.0.1"
+                env["SUB_STORE_BACKEND_API_PORT"] = PORT.toString()
+                env["SUB_STORE_DATA_BASE_PATH"] = dataDir(ctx).absolutePath
+                env["SUB_STORE_FRONTEND_PATH"] = frontendDir(ctx).absolutePath
+                env["SUB_STORE_BACKEND_MERGE"] = "true"
+                env["SUB_STORE_FRONTEND_BACKEND_PATH"] = "/"
+                // 关键：后端默认 CORS 白名单不含本机地址，带 Origin 的请求会被直接 403，
+                // WebView 加载模块脚本与调用 API 都会带 Origin，必须把本机地址放行（1.0.0 黑屏根因）
+                env["SUB_STORE_CORS_ALLOWED_ORIGINS"] =
+                    "http://127.0.0.1:3000,https://sub-store.vercel.app,http://substore.stash,https://substore.stash"
+                BootLog.append(ctx, "启动 node: $nativeLib/libnodebin.so ${bundleFile(ctx)}")
+                val p = pb.start()
+                process = p
+                BootLog.append(ctx, "node 进程已创建 pid 状态 alive=${p.isAlive}")
+                startMirror(ctx, p)
+                // 等待接口就绪（最多 ~60 秒）
+                var up = false
+                for (i in 1..120) {
+                    if (!p.isAlive) break
+                    if (probe()) { up = true; break }
+                    Thread.sleep(500)
+                }
+                if (up) {
+                    BootLog.append(ctx, "后端接口已就绪（probe 成功）")
+                    setState(State.RUNNING)
+                } else if (p.isAlive) {
+                    BootLog.append(ctx, "异常：node 进程存活但 60 秒内接口未就绪")
+                    setState(State.FAILED) // 进程在但接口不通
+                } else {
+                    BootLog.append(ctx, "异常：node 进程在接口就绪前已退出")
+                    setState(if (stopRequested) State.STOPPED else State.FAILED)
+                }
+                val code = p.waitFor()
+                process = null
+                if (!stopRequested) setState(State.FAILED)
+                appendServiceLog(ctx, "node 进程退出，code=$code")
+            } catch (t: Throwable) {
+                process = null
+                if (!stopRequested) setState(State.FAILED)
+                BootLog.append(ctx, "启动异常：${t.javaClass.simpleName}: ${t.message}")
+                appendServiceLog(ctx, "启动失败：${t.javaClass.simpleName}: ${t.message}")
+            }
+        }.start()
+    }
+
+    /** 把 node 的输出日志持续镜像到 BootLog（含公共下载目录那份）。 */
+    private fun startMirror(ctx: Context, p: Process) {
+        Thread {
+            var offset = 0L
+            val log = logFile(ctx)
+            while (p.isAlive) {
+                try {
+                    if (log.exists() && log.length() > offset) {
+                        val bytes = log.readBytes()
+                        if (bytes.size > offset) {
+                            BootLog.appendRaw(
+                                ctx,
+                                String(bytes, offset.toInt(), bytes.size - offset.toInt())
+                            )
+                            offset = bytes.size.toLong()
+                        }
+                    }
+                } catch (_: Throwable) {}
+                Thread.sleep(1500)
+            }
+            // 进程退出后把尾巴刷完
+            try {
+                if (log.exists() && log.length() > offset) {
+                    val bytes = log.readBytes()
+                    if (bytes.size > offset) {
+                        BootLog.appendRaw(ctx, String(bytes, offset.toInt(), bytes.size - offset.toInt()))
+                    }
+                }
+            } catch (_: Throwable) {}
+        }.apply { isDaemon = true }.start()
+    }
+
+    @Synchronized
+    fun stop(ctx: Context) {
+        stopRequested = true
+        val p = process
+        process = null
+        if (p != null) {
+            p.destroy()
+            Thread {
+                Thread.sleep(1500)
+                if (p.isAlive) p.destroyForcibly()
+            }.start()
+        }
+        setState(State.STOPPED)
+    }
+
+    fun probe(): Boolean {
+        return try {
+            val conn = URL("$BASE_URL/api/utils/env").openConnection() as HttpURLConnection
+            conn.connectTimeout = 800
+            conn.readTimeout = 800
+            conn.requestMethod = "GET"
+            val ok = conn.responseCode in 200..499
+            conn.disconnect()
+            ok
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    fun appendServiceLog(ctx: Context, msg: String) {
+        try {
+            val log = logFile(ctx)
+            log.parentFile?.mkdirs()
+            log.appendText("[app] $msg\n")
+        } catch (_: Throwable) {}
+    }
+}

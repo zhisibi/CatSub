@@ -1,0 +1,15 @@
+# 构建产物
+app/build-manual/
+*.apk
+
+# 签名密钥（绝不入库）
+keystore/*.keystore
+signing.local.txt
+
+# 生成物：由 scripts/ 脚本从上游/Termux 仓库获取，不直接入库
+app/src/main/assets/runtime/
+runtime-libs/
+
+# 杂项
+.DS_Store
+*.log
