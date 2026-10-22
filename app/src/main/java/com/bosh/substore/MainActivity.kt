@@ -8,14 +8,18 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.method.LinkMovementMethod
 import android.text.util.Linkify
 import android.view.Gravity
 import android.view.MenuItem
+import android.view.PixelCopy
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.ValueCallback
@@ -36,7 +40,7 @@ import android.widget.Toast
 class MainActivity : Activity() {
 
     companion object {
-        const val APP_VERSION = "1.1.3"
+        const val APP_VERSION = "1.1.4"
         const val REPO_URL = "https://github.com/zhisibi/CatSub.git"
 
         const val DISCLAIMER = "CatSub 是 Sub-Store 的第三方安卓客户端。Sub-Store 为 AGPL-3.0 开源项目，版权归其原作者及全体贡献者所有。\n\n" +
@@ -55,6 +59,7 @@ class MainActivity : Activity() {
     private var pageLoaded = false
     private var initialized = false
     private var updateRunning = false
+    private var shotDone = false
 
     private val stateListener: (NodeRuntime.State) -> Unit = { s ->
         runOnUiThread { updateStatus(s) }
@@ -98,6 +103,21 @@ class MainActivity : Activity() {
             initWebView()
             startBackend()
             waitForServerAndLoad()
+            window.decorView.post {
+                try {
+                    val wv = webView
+                    val loc = IntArray(2)
+                    wv?.getLocationOnScreen(loc)
+                    BootLog.append(
+                        this,
+                        "窗口几何：multiWindow=${isInMultiWindowMode} " +
+                            "winAttrs=${window.attributes.width}x${window.attributes.height} g=${window.attributes.gravity} " +
+                            "decor=${window.decorView.width}x${window.decorView.height} " +
+                            "wv=${wv?.width}x${wv?.height} wvLoc=${loc[0]},${loc[1]} " +
+                            "density=${resources.displayMetrics.density} hwAccel=${wv?.isHardwareAccelerated} layer=${wv?.layerType}"
+                    )
+                } catch (_: Throwable) {}
+            }
         }
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -191,6 +211,12 @@ class MainActivity : Activity() {
             setStage("正在创建 WebView…")
             val wv = WebView(this)
             webView = wv
+            // 关键修复（1.1.4）：DOM 完整但屏幕全黑是 WebView 硬件加速合成失败的典型症状
+            // （部分机型/驱动），强制软件绘制层绕过 GPU 合成路径
+            try {
+                wv.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+                BootLog.append(this, "WebView 已强制软件绘制层（排查硬件合成空白）")
+            } catch (_: Throwable) {}
             BootLog.append(this, "WebView UA: ${wv.settings.userAgentString}")
             try {
                 val pkg = WebView.getCurrentWebViewPackage()
@@ -277,6 +303,46 @@ class MainActivity : Activity() {
                         }
                     } catch (_: Throwable) {}
                 }, 1500)
+                // 窗口截图探针（每进程一次）：PixelCopy 抓窗口实际合成结果，
+                // 统计亮像素并存图到 下载/SubStore/window-shot.png，区分“没画出来”与“画了但看不见”
+                if (!shotDone) {
+                    shotDone = true
+                    view.postDelayed({
+                        try {
+                            val decor = window.decorView
+                            if (decor.width > 0 && decor.height > 0) {
+                                val bmp = Bitmap.createBitmap(decor.width, decor.height, Bitmap.Config.ARGB_8888)
+                                PixelCopy.request(window, bmp, { result ->
+                                    if (result == PixelCopy.SUCCESS) {
+                                        var bright = 0L
+                                        var total = 0L
+                                        val step = 6
+                                        var x = 0
+                                        while (x < bmp.width) {
+                                            var y = 0
+                                            while (y < bmp.height) {
+                                                val c = bmp.getPixel(x, y)
+                                                if (maxOf(Color.red(c), Color.green(c), Color.blue(c)) > 150) bright++
+                                                total++
+                                                y += step
+                                            }
+                                            x += step
+                                        }
+                                        BootLog.append(
+                                            this@MainActivity,
+                                            "窗口截图探针：PixelCopy 成功 ${bmp.width}x${bmp.height}，采样亮像素 $bright/$total"
+                                        )
+                                        BootLog.savePublicPng(this@MainActivity, "window-shot.png", bmp)
+                                    } else {
+                                        BootLog.append(this@MainActivity, "窗口截图探针：PixelCopy 失败 code=$result")
+                                    }
+                                }, Handler(Looper.getMainLooper()))
+                            }
+                        } catch (t: Throwable) {
+                            BootLog.append(this@MainActivity, "窗口截图探针异常：${t.javaClass.simpleName}: ${t.message}")
+                        }
+                    }, 2200)
+                }
             }
 
             override fun onReceivedHttpError(

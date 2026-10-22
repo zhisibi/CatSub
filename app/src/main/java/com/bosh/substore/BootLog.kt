@@ -67,6 +67,44 @@ object BootLog {
         } catch (_: Throwable) {}
     }
 
+    /** 把位图存到公共「下载/SubStore/」下（同名覆盖），供回传诊断截图。 */
+    fun savePublicPng(ctx: Context, name: String, bmp: android.graphics.Bitmap) {
+        try {
+            val baos = java.io.ByteArrayOutputStream()
+            bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, baos)
+            val bytes = baos.toByteArray()
+            if (Build.VERSION.SDK_INT >= 29) {
+                val resolver = ctx.contentResolver
+                val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                val selection =
+                    "${MediaStore.Downloads.DISPLAY_NAME}=? AND ${MediaStore.Downloads.RELATIVE_PATH}=?"
+                val args = arrayOf(name, Environment.DIRECTORY_DOWNLOADS + "/SubStore/")
+                var uri: Uri? = null
+                resolver.query(collection, arrayOf(MediaStore.Downloads._ID), selection, args, null)?.use { c ->
+                    if (c.moveToFirst()) uri = Uri.withAppendedPath(collection, c.getLong(0).toString())
+                }
+                if (uri == null) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Downloads.DISPLAY_NAME, name)
+                        put(MediaStore.Downloads.MIME_TYPE, "image/png")
+                        put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/SubStore")
+                    }
+                    uri = resolver.insert(collection, values)
+                }
+                if (uri != null) {
+                    resolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
+                }
+            } else {
+                val dir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "SubStore"
+                )
+                dir.mkdirs()
+                File(dir, name).writeBytes(bytes)
+            }
+        } catch (_: Throwable) {}
+    }
+
     private fun appendPublic(ctx: Context, text: String) {
         try {
             if (Build.VERSION.SDK_INT >= 29) {
