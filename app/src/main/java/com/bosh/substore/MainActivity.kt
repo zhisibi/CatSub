@@ -35,10 +35,8 @@ import android.widget.Toast
 class MainActivity : Activity() {
 
     companion object {
-        const val APP_VERSION = "1.1.0"
+        const val APP_VERSION = "1.1.1"
         const val REPO_URL = "https://github.com/zhisibi/CatSub.git"
-        // 进程级标记：同一次运行只弹一次免责声明（进程重启后重新弹）
-        @Volatile var disclaimerAgreed = false
 
         const val DISCLAIMER = "CatSub 是 Sub-Store 的第三方安卓客户端。Sub-Store 为 AGPL-3.0 开源项目，版权归其原作者及全体贡献者所有。\n\n" +
             "本软件仅将 Sub-Store 前后端与 Node.js 运行时打包为安卓应用，不提供、不存储、不分发任何订阅内容或节点信息；您的全部数据仅保存在本机设备。\n\n" +
@@ -66,7 +64,7 @@ class MainActivity : Activity() {
         // 外壳先上屏；免责声明未同意前不做任何初始化
         buildShell()
         setStage("等待确认免责声明…")
-        if (disclaimerAgreed) {
+        if (Prefs.disclaimerAccepted(this)) {
             proceedInit()
         } else {
             showDisclaimer()
@@ -79,7 +77,7 @@ class MainActivity : Activity() {
             .setMessage(DISCLAIMER + "\n\n开源仓库：$REPO_URL")
             .setCancelable(false)
             .setPositiveButton("同意并继续") { _, _ ->
-                disclaimerAgreed = true
+                Prefs.setDisclaimerAccepted(this)
                 BootLog.append(this, "用户已同意免责声明")
                 proceedInit()
             }

@@ -147,10 +147,9 @@ object Updater {
             targetFrontend = frontend.version
         }
 
-        // 若只更新一端，另一端沿用当前文件，保证 applyUpdate 拿到完整两件套
-        val bundleToApply = newBundle ?: NodeRuntime.bundleFile(ctx)
-        val frontendToApply = newFrontendDir ?: NodeRuntime.frontendDir(ctx)
+        // 只更新的一端传文件，另一端传 null 由 applyUpdate 保留现用文件；
+        // 绝不能把现用文件/目录本身当“新文件”传进去（1.1.0 自删前端的根因）
         onStage("正在应用更新…", 100)
-        NodeRuntime.applyUpdate(ctx, bundleToApply, frontendToApply, targetBackend, targetFrontend)
+        NodeRuntime.applyUpdate(ctx, newBundle, newFrontendDir, targetBackend, targetFrontend)
     }
 }

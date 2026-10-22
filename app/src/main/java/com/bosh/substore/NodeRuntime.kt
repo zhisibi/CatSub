@@ -17,7 +17,7 @@ object NodeRuntime {
     const val BUNDLED_BACKEND_VERSION = "2.42.6"
     const val BUNDLED_FRONTEND_VERSION = "2.34.1"
     const val NODE_VERSION = "26.4.0"
-    const val RUNTIME_VERSION = "backend-2.42.6_frontend-2.34.1_node-26.4.0_v3"
+    const val RUNTIME_VERSION = "backend-2.42.6_frontend-2.34.1_node-26.4.0_v4"
 
     enum class State { STOPPED, STARTING, RUNNING, FAILED }
 
@@ -72,11 +72,29 @@ object NodeRuntime {
 
     fun isDynamic(ctx: Context): Boolean = dynamicMarker(ctx).exists()
 
-    /** 释放 assets/runtime 到 filesDir/runtime；版本一致或已有动态更新则跳过。 */
+    /**
+     * 释放 assets/runtime 到 filesDir/runtime；版本一致且文件完整则跳过。
+     * 完整性自愈：前端 index.html 缺失时只补释放前端（保留现有 bundle，含在线更新的后端，
+     * 救 1.1.0 在线更新失败把前端弄丢的状态）；bundle 缺失/为空时整包重新释放。
+     */
     @Synchronized
     fun ensureExtracted(ctx: Context) {
-        if (isDynamic(ctx) && bundleFile(ctx).exists() && frontendDir(ctx).exists()) return
-        if (Prefs.extractedVer(ctx) == RUNTIME_VERSION && bundleFile(ctx).exists()) return
+        val bundleOk = bundleFile(ctx).exists() && bundleFile(ctx).length() > 0
+        val frontendOk = File(frontendDir(ctx), "index.html").exists()
+        if (bundleOk && frontendOk && Prefs.extractedVer(ctx) == RUNTIME_VERSION) return
+        if (bundleOk && frontendOk && isDynamic(ctx)) return
+        if (bundleOk && !frontendOk) {
+            BootLog.append(ctx, "检测到前端文件缺失，自动补释放内置前端")
+            frontendDir(ctx).deleteRecursively()
+            copyAssetTree(ctx, "runtime/frontend", frontendDir(ctx))
+            // 有动态标记时把其中前端版本改为内置版本，保证「关于」显示与实际一致
+            val (dynBackend, _) = dynamicVersions(ctx)
+            if (dynBackend != null) {
+                dynamicMarker(ctx).writeText("backend=$dynBackend;frontend=$BUNDLED_FRONTEND_VERSION")
+            }
+            Prefs.setExtractedVer(ctx, RUNTIME_VERSION)
+            return
+        }
         val dir = runtimeDir(ctx)
         dir.deleteRecursively()
         dir.mkdirs()
@@ -84,16 +102,28 @@ object NodeRuntime {
         Prefs.setExtractedVer(ctx, RUNTIME_VERSION)
     }
 
-    /** 应用在线更新下载好的后端 bundle 与前端目录，并打动态标记。 */
+    /**
+     * 应用在线更新。newBundle/newFrontendDir 为 null 表示该端不更新，现有文件原样保留
+     * （1.1.0 的教训：把现用目录当“新文件”传进来替换，会先自删再拷贝，直接把前端弄丢）。
+     * 前端先拷到暂存目录、校验 index.html 后再整体更名替换，中途失败不动现有前端。
+     */
     @Synchronized
-    fun applyUpdate(ctx: Context, newBundle: File, newFrontendDir: File, backendVer: String, frontendVer: String) {
+    fun applyUpdate(ctx: Context, newBundle: File?, newFrontendDir: File?, backendVer: String, frontendVer: String) {
         stop(ctx)
         val dir = runtimeDir(ctx)
         dir.mkdirs()
-        newBundle.copyTo(bundleFile(ctx), overwrite = true)
-        val fe = frontendDir(ctx)
-        fe.deleteRecursively()
-        newFrontendDir.copyRecursively(fe, overwrite = true)
+        if (newBundle != null && newBundle.canonicalPath != bundleFile(ctx).canonicalPath) {
+            newBundle.copyTo(bundleFile(ctx), overwrite = true)
+        }
+        if (newFrontendDir != null && newFrontendDir.canonicalPath != frontendDir(ctx).canonicalPath) {
+            val fe = frontendDir(ctx)
+            val staging = File(dir, "frontend.new")
+            staging.deleteRecursively()
+            newFrontendDir.copyRecursively(staging, overwrite = true)
+            require(File(staging, "index.html").exists()) { "新前端缺少 index.html，已放弃替换" }
+            fe.deleteRecursively()
+            check(staging.renameTo(fe)) { "前端目录替换失败" }
+        }
         dynamicMarker(ctx).writeText("backend=$backendVer;frontend=$frontendVer")
         Prefs.setExtractedVer(ctx, RUNTIME_VERSION)
         BootLog.append(ctx, "已应用动态更新：后端 $backendVer / 前端 $frontendVer")

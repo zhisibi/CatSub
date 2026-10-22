@@ -6,6 +6,15 @@ object Prefs {
     private const val FILE = "substore_prefs"
     private const val KEY_AUTOSTART = "autostart"
     private const val KEY_EXTRACTED_VER = "extracted_runtime_ver"
+    private const val KEY_DISCLAIMER = "disclaimer_accepted"
+
+    /** 免责声明是否已同意（持久化，只在第一次运行时弹）。 */
+    fun disclaimerAccepted(ctx: Context): Boolean =
+        ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean(KEY_DISCLAIMER, false)
+
+    fun setDisclaimerAccepted(ctx: Context) {
+        ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean(KEY_DISCLAIMER, true).apply()
+    }
 
     fun autostart(ctx: Context): Boolean =
         ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean(KEY_AUTOSTART, true)
