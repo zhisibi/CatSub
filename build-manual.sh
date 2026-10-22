@@ -30,7 +30,7 @@ echo "[2/6] aapt2 link (unsigned apk + R.java)"
     --manifest "$APP/src/main/AndroidManifest.xml" \
     -A "$APP/src/main/assets" \
     --java "$BUILD/gen" \
-    --version-code 6 --version-name 1.1.2 \
+    --version-code 7 --version-name 1.1.3 \
     --min-sdk-version 26 --target-sdk-version 34 \
     "$BUILD/compiled.zip"
 

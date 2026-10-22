@@ -64,8 +64,10 @@ class LogActivity : Activity() {
             Toast.makeText(this, "日志已复制", Toast.LENGTH_SHORT).show()
         }
         btnClear.setOnClickListener {
+            BootLog.clear(this)
             try { NodeRuntime.logFile(this).writeText("") } catch (_: Throwable) {}
             load()
+            Toast.makeText(this, "日志已清空", Toast.LENGTH_SHORT).show()
         }
         load()
     }

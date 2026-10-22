@@ -43,6 +43,30 @@ object BootLog {
         appendPublic(ctx, text)
     }
 
+    /** 清空日志：私有 boot.log 与公共镜像一起截断（1.1.2 前清空按钮漏了这份，看起来没反应）。 */
+    @Synchronized
+    fun clear(ctx: Context) {
+        try {
+            val f = localFile(ctx)
+            f.parentFile?.mkdirs()
+            f.writeText("")
+        } catch (_: Throwable) {}
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                val uri = resolvePublicUri(ctx)
+                if (uri != null) {
+                    ctx.contentResolver.openOutputStream(uri, "wt")?.use { it.write(ByteArray(0)) }
+                }
+            } else {
+                val file = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "SubStore/boot-log.txt"
+                )
+                if (file.exists()) file.writeText("")
+            }
+        } catch (_: Throwable) {}
+    }
+
     private fun appendPublic(ctx: Context, text: String) {
         try {
             if (Build.VERSION.SDK_INT >= 29) {
