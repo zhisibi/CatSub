@@ -17,7 +17,7 @@ object NodeRuntime {
     const val BUNDLED_BACKEND_VERSION = "2.42.6"
     const val BUNDLED_FRONTEND_VERSION = "2.34.1"
     const val NODE_VERSION = "26.4.0"
-    const val RUNTIME_VERSION = "backend-2.42.6_frontend-2.34.1_node-26.4.0_v5"
+    const val RUNTIME_VERSION = "backend-2.42.6_frontend-2.34.1_node-26.4.0_v6"
 
     enum class State { STOPPED, STARTING, RUNNING, FAILED }
 
@@ -45,6 +45,7 @@ object NodeRuntime {
     fun logFile(ctx: Context): File = File(ctx.filesDir, "logs/node.log")
     fun bundleFile(ctx: Context): File = File(runtimeDir(ctx), "sub-store.bundle.js")
     fun frontendDir(ctx: Context): File = File(runtimeDir(ctx), "frontend")
+    fun certFile(ctx: Context): File = File(runtimeDir(ctx), "cert.pem")
 
     private fun dynamicMarker(ctx: Context): File = File(runtimeDir(ctx), "DYNAMIC.txt")
 
@@ -79,6 +80,14 @@ object NodeRuntime {
      */
     @Synchronized
     fun ensureExtracted(ctx: Context) {
+        // CA 证书包独立保障：与 bundle/前端/动态版本无关，缺失即从 assets 补释放。
+        // 动态更新过的安装会在下方提前返回，整包重释放指望不上，必须单独保它。
+        val cert = certFile(ctx)
+        if (!cert.isFile || cert.length() == 0L) {
+            if (cert.isDirectory) cert.delete()
+            copyAssetTree(ctx, "cert.pem", cert)
+            BootLog.append(ctx, "已释放内置 CA 证书包（供后端 HTTPS 出站校验）")
+        }
         val bundleOk = bundleFile(ctx).exists() && bundleFile(ctx).length() > 0
         // 前端完整性看入口三件套：只有 index.html、缺 index.js 时页面会黑屏但不报错
         val frontendOk = File(frontendDir(ctx), "index.html").exists() &&
@@ -198,6 +207,15 @@ object NodeRuntime {
                 // WebView 加载模块脚本与调用 API 都会带 Origin，必须把本机地址放行（1.0.0 黑屏根因）
                 env["SUB_STORE_CORS_ALLOWED_ORIGINS"] =
                     "http://127.0.0.1:3000,https://sub-store.vercel.app,http://substore.stash,https://substore.stash"
+                // 关键：Termux 版 Node 默认去 Termux 前缀路径找 CA 证书包，本应用里不存在，
+                // 不指给它，所有 HTTPS 出站（拉远程订阅、在线更新）都会报
+                // "unable to get local issuer certificate"。APK 内置 Mozilla CA 包，
+                // ensureExtracted 已保证它落在运行时目录。
+                val cert = certFile(ctx)
+                if (cert.isFile && cert.length() > 0) {
+                    env["SSL_CERT_FILE"] = cert.absolutePath
+                    env["NODE_EXTRA_CA_CERTS"] = cert.absolutePath
+                }
                 BootLog.append(ctx, "启动 node: $nativeLib/libnodebin.so ${bundleFile(ctx)}")
                 val p = pb.start()
                 process = p

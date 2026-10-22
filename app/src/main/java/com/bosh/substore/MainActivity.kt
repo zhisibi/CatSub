@@ -40,7 +40,7 @@ import android.widget.Toast
 class MainActivity : Activity() {
 
     companion object {
-        const val APP_VERSION = "1.1.6"
+        const val APP_VERSION = "1.1.7"
         const val REPO_URL = "https://github.com/zhisibi/CatSub.git"
 
         const val DISCLAIMER = "CatSub 是 Sub-Store 的第三方安卓客户端。Sub-Store 为 AGPL-3.0 开源项目，版权归其原作者及全体贡献者所有。\n\n" +
