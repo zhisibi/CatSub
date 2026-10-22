@@ -40,7 +40,7 @@ import android.widget.Toast
 class MainActivity : Activity() {
 
     companion object {
-        const val APP_VERSION = "1.1.4"
+        const val APP_VERSION = "1.1.5"
         const val REPO_URL = "https://github.com/zhisibi/CatSub.git"
 
         const val DISCLAIMER = "CatSub 是 Sub-Store 的第三方安卓客户端。Sub-Store 为 AGPL-3.0 开源项目，版权归其原作者及全体贡献者所有。\n\n" +
@@ -60,6 +60,27 @@ class MainActivity : Activity() {
     private var initialized = false
     private var updateRunning = false
     private var shotDone = false
+    private var dumpDone = false
+
+    /** 把外壳视图层级（类名/尺寸/位置/可见性）整棵倾倒进日志，一次看清谁在占地方。 */
+    private fun dumpHierarchy(v: View, depth: Int, sb: StringBuilder) {
+        if (depth > 4) return
+        val lp = v.layoutParams
+        val lpDesc = when (lp) {
+            is LinearLayout.LayoutParams -> "lp=${lp.width}x${lp.height} w=${lp.weight}"
+            is FrameLayout.LayoutParams -> "lp=${lp.width}x${lp.height}"
+            is ViewGroup.LayoutParams -> "lp=${lp.width}x${lp.height}"
+            else -> "lp=null"
+        }
+        sb.append("  ".repeat(depth))
+            .append(v.javaClass.simpleName)
+            .append(" wh=${v.width}x${v.height} top=${v.top} vis=${v.visibility} ").append(lpDesc)
+        if (v is TextView) sb.append(" text='${v.text?.take(12)}'")
+        sb.append('\n')
+        if (v is ViewGroup) {
+            for (i in 0 until v.childCount) dumpHierarchy(v.getChildAt(i), depth + 1, sb)
+        }
+    }
 
     private val stateListener: (NodeRuntime.State) -> Unit = { s ->
         runOnUiThread { updateStatus(s) }
@@ -170,7 +191,10 @@ class MainActivity : Activity() {
         bar.addView(statusDot)
         bar.addView(View(this), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         bar.addView(btnMore)
-        root.addView(bar)
+        // 1.1.5：顶栏必须显式固定高度。1.1.4 的设备日志实锤：顶栏被测成几乎整屏高
+        // （CENTER_VERTICAL 使标题落在屏幕 50% 处），下方 frame 被压到高度 0，
+        // WebView 实测 1080x0 位于屏幕底部——这才是“DOM 完整但屏幕全黑”的真根因。
+        root.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)))
 
         stageView = TextView(this).apply {
             setBackgroundColor(Color.parseColor("#FFF3CD"))
@@ -303,6 +327,19 @@ class MainActivity : Activity() {
                         }
                     } catch (_: Throwable) {}
                 }, 1500)
+                // 层级倾倒（每进程一次）：3.5 秒后把外壳每个视图的尺寸位置写进日志
+                if (!dumpDone) {
+                    dumpDone = true
+                    view.postDelayed({
+                        try {
+                            val sb = StringBuilder("视图层级倾倒（root 为窗口内容根）：\n")
+                            dumpHierarchy(window.decorView.findViewById<View>(android.R.id.content), 0, sb)
+                            BootLog.append(this@MainActivity, sb.toString().trimEnd())
+                        } catch (t: Throwable) {
+                            BootLog.append(this@MainActivity, "层级倾倒异常：${t.javaClass.simpleName}: ${t.message}")
+                        }
+                    }, 3500)
+                }
                 // 窗口截图探针（每进程一次）：PixelCopy 抓窗口实际合成结果，
                 // 统计亮像素并存图到 下载/SubStore/window-shot.png，区分“没画出来”与“画了但看不见”
                 if (!shotDone) {
