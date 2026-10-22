@@ -22,6 +22,7 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
+import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
@@ -35,7 +36,7 @@ import android.widget.Toast
 class MainActivity : Activity() {
 
     companion object {
-        const val APP_VERSION = "1.1.1"
+        const val APP_VERSION = "1.1.2"
         const val REPO_URL = "https://github.com/zhisibi/CatSub.git"
 
         const val DISCLAIMER = "CatSub 是 Sub-Store 的第三方安卓客户端。Sub-Store 为 AGPL-3.0 开源项目，版权归其原作者及全体贡献者所有。\n\n" +
@@ -203,6 +204,16 @@ class MainActivity : Activity() {
                 sp.edit().putBoolean(cacheKey, true).apply()
                 BootLog.append(this, "已清理 WebView 缓存（运行时 ${NodeRuntime.RUNTIME_VERSION}）")
             }
+            // 每个 App 版本首次运行重置一次 WebView 存储：清掉可能被毒化的
+            // ServiceWorker/缓存存储/localStorage（订阅数据在后端文件里，不受影响）
+            val resetKey = "storage_reset_$APP_VERSION"
+            if (!sp.getBoolean(resetKey, false)) {
+                try { WebStorage.getInstance().deleteAllData() } catch (_: Throwable) {}
+                wv.clearCache(true)
+                wv.clearHistory()
+                sp.edit().putBoolean(resetKey, true).apply()
+                BootLog.append(this, "已重置 WebView 存储（版本 $APP_VERSION 首次运行）")
+            }
             setupWebView(wv)
             frame.addView(wv, 0, FrameLayout.LayoutParams(-1, -1))
             BootLog.append(this, "WebView 创建成功")
@@ -251,6 +262,32 @@ class MainActivity : Activity() {
                 overlay.visibility = View.GONE
                 stageView.visibility = View.GONE
                 BootLog.append(this@MainActivity, "网页已加载完成：$url")
+                // DOM 探针：onPageFinished 不等于渲染成功，1.5 秒后把页面真实状态写进日志
+                view.postDelayed({
+                    try {
+                        view.evaluateJavascript(
+                            "(function(){try{var a=document.getElementById('app');" +
+                                "return JSON.stringify({href:location.href,title:document.title," +
+                                "ready:document.readyState,appChildren:a?a.childElementCount:-1," +
+                                "textLen:document.body?document.body.innerText.length:0," +
+                                "text:(document.body?document.body.innerText:'').slice(0,80)})" +
+                                "}catch(e){return 'probe-error:'+e}})()"
+                        ) { result ->
+                            BootLog.append(this@MainActivity, "页面 DOM 探针：$result")
+                        }
+                    } catch (_: Throwable) {}
+                }, 1500)
+            }
+
+            override fun onReceivedHttpError(
+                view: WebView, request: WebResourceRequest, response: android.webkit.WebResourceResponse
+            ) {
+                if (response.statusCode >= 400) {
+                    BootLog.append(
+                        this@MainActivity,
+                        "网页资源 HTTP 错误：${response.statusCode} ${request.url}"
+                    )
+                }
             }
 
             override fun onReceivedError(

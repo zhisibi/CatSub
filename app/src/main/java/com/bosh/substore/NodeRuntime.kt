@@ -17,7 +17,7 @@ object NodeRuntime {
     const val BUNDLED_BACKEND_VERSION = "2.42.6"
     const val BUNDLED_FRONTEND_VERSION = "2.34.1"
     const val NODE_VERSION = "26.4.0"
-    const val RUNTIME_VERSION = "backend-2.42.6_frontend-2.34.1_node-26.4.0_v4"
+    const val RUNTIME_VERSION = "backend-2.42.6_frontend-2.34.1_node-26.4.0_v5"
 
     enum class State { STOPPED, STARTING, RUNNING, FAILED }
 
@@ -80,7 +80,10 @@ object NodeRuntime {
     @Synchronized
     fun ensureExtracted(ctx: Context) {
         val bundleOk = bundleFile(ctx).exists() && bundleFile(ctx).length() > 0
-        val frontendOk = File(frontendDir(ctx), "index.html").exists()
+        // 前端完整性看入口三件套：只有 index.html、缺 index.js 时页面会黑屏但不报错
+        val frontendOk = File(frontendDir(ctx), "index.html").exists() &&
+            File(frontendDir(ctx), "index.js").exists() &&
+            File(frontendDir(ctx), "registerSW.js").exists()
         if (bundleOk && frontendOk && Prefs.extractedVer(ctx) == RUNTIME_VERSION) return
         if (bundleOk && frontendOk && isDynamic(ctx)) return
         if (bundleOk && !frontendOk) {
@@ -142,8 +145,12 @@ object NodeRuntime {
         val am = ctx.assets
         val children = am.list(assetPath) ?: emptyArray()
         if (children.isEmpty()) {
-            am.open(assetPath).use { input ->
-                outDir.outputStream().use { input.copyTo(it) }
+            try {
+                am.open(assetPath).use { input ->
+                    outDir.outputStream().use { input.copyTo(it) }
+                }
+            } catch (_: Throwable) {
+                outDir.mkdirs() // 空目录：list 为空且 open 失败，按目录处理
             }
             return
         }
